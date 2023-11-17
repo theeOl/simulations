@@ -1,0 +1,589 @@
+
+#include <iostream>
+#include <SDL.h>
+#include <vector>
+#include <string>
+#include <cstdlib>
+#include <ctime>
+#include <cmath>
+#include <random>
+#include <unordered_map>
+#include <unordered_set>
+using namespace std;
+
+// Returns a random integer between min and max, inclusive
+random_device rd; // obtain a random number from hardware
+mt19937 gen(rd()); // seed the generator
+int randomInt(int min, int max) {
+    uniform_int_distribution<> rand(min, max); // define the range
+    return rand(gen);
+}
+
+//environment variabls
+
+//const int TARGET_FRAME_TIME = 1000 / 80;  
+const int SCREEN_WIDTH = 700;
+const int SCREEN_HEIGHT = 700;
+const int SPAWN_PADDING = 60;
+const int TRIANGLES = 600;
+const double VIEW_ANGLE = 250.0;
+const double SEARCH_RADIUS = 24;
+const double VELOCITY = 0.2;
+const double WEIGHT_STRENGTH = 90;
+
+class Triangle {
+private:
+    double px, py;         // Position
+    double vx, vy;         // Viewing direction
+    double search_radius;  // Search Radius
+    double view_angle;     // Angle of sight
+    double velocity;       // Moving speed
+    
+public:
+    Triangle(double angle, double r, double vel) {   
+        search_radius = r;
+        view_angle = angle;
+        velocity = vel; 
+
+        px = randomInt(SPAWN_PADDING + 10, SCREEN_WIDTH - SPAWN_PADDING - 10);
+        py = randomInt(SPAWN_PADDING + 10, SCREEN_HEIGHT - SPAWN_PADDING - 10);
+        
+        double rotval = (double)randomInt(-180, 180);
+        double rotation = rotval * M_PI / 180.0;  // Convert degrees to radians
+        vx = 1.0;
+        vy = 0.0;
+
+        // Rotate the vector
+        double new_vx = vx * cos(rotation) - vy * sin(rotation);
+        double new_vy = vx * sin(rotation) + vy * cos(rotation);
+
+        vx = new_vx;
+        vy = new_vy;
+    }
+
+    // Getters
+    double getPx() const { return px; }
+    double getPy() const { return py; }
+    double getVx() const { return vx; }
+    double getVy() const { return vy; }
+    double getSearchRadius() const { return search_radius; }
+    double getViewAngle() const { return view_angle; }
+    double getVelocity() const { return velocity; }
+
+    // Setters
+    void setPx(double val) { px = val; }
+    void setPy(double val) { py = val; }
+    void setVx(double val) { vx = val; }
+    void setVy(double val) { vy = val; }
+    void setSearchRadius(double val) { search_radius = val; }
+    void setViewAngle(double val) { view_angle = val; }
+    void setVelocity(double val) { velocity = val; }
+
+
+    void move() {
+        px += (vx * velocity);
+        py += (vy * velocity);
+
+        // Wrap around the screen edges
+        if (px < 0) px += SCREEN_WIDTH;
+        if (px > SCREEN_WIDTH) px -= SCREEN_WIDTH;
+        if (py < 0) py += SCREEN_HEIGHT;
+        if (py > SCREEN_HEIGHT) py -= SCREEN_HEIGHT;
+    }
+
+    void draw(SDL_Renderer* renderer, int r, int g, int b, int a) {
+        // Set the draw color
+        SDL_SetRenderDrawColor(renderer, r, g, b, a);
+
+        // Helper lambda to draw the triangle given specific coordinates
+        auto drawTriangle = [&](double px, double py) {
+            int tipX = px + vx * (search_radius / 6);
+            int tipY = py + vy * (search_radius / 6);
+            int base1X = px - vy * (search_radius / 9) - vx * (search_radius / 18);
+            int base1Y = py + vx * (search_radius / 9) - vy * (search_radius / 18);
+            int base2X = px + vy * (search_radius / 9) - vx * (search_radius / 18);
+            int base2Y = py - vx * (search_radius / 9) - vy * (search_radius / 18);
+
+            SDL_RenderDrawLine(renderer, tipX, tipY, base1X, base1Y);
+            SDL_RenderDrawLine(renderer, tipX, tipY, base2X, base2Y);
+            SDL_RenderDrawLine(renderer, base1X, base1Y, base2X, base2Y);
+        };
+
+        // Draw the main triangle
+        drawTriangle(px, py);
+
+        // Handle triangles that are partially off-screen
+        // If the triangle is near the edges of the screen, draw its wrapped-around parts
+        if (px + search_radius > SCREEN_WIDTH) drawTriangle(px - SCREEN_WIDTH, py);
+        if (px - search_radius < 0) drawTriangle(px + SCREEN_WIDTH, py);
+        if (py + search_radius > SCREEN_HEIGHT) drawTriangle(px, py - SCREEN_HEIGHT);
+        if (py - search_radius < 0) drawTriangle(px, py + SCREEN_HEIGHT);
+    }
+
+
+
+    void drawViewR(SDL_Renderer* renderer) {
+        SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
+
+        // Calculate end points
+        double endX = px - vx * search_radius;
+        double endY = py - vy * search_radius;
+
+        // Helper lambda to draw the viewing direction given specific coordinates
+        auto drawViewLine = [&](double startX, double startY, double endX, double endY) {
+            SDL_RenderDrawLine(renderer, startX, startY, endX, endY);
+        };
+
+        // Draw the main viewing direction
+        drawViewLine(px, py, endX, endY);
+
+        // Handle lines that are partially off-screen
+        // If the line is near the edges of the screen, draw its wrapped-around parts
+        if (endX > SCREEN_WIDTH || px > SCREEN_WIDTH) {
+            drawViewLine(px - SCREEN_WIDTH, py, endX - SCREEN_WIDTH, endY);
+        }
+        if (endX < 0 || px < 0) {
+            drawViewLine(px + SCREEN_WIDTH, py, endX + SCREEN_WIDTH, endY);
+        }
+        if (endY > SCREEN_HEIGHT || py > SCREEN_HEIGHT) {
+            drawViewLine(px, py - SCREEN_HEIGHT, endX, endY - SCREEN_HEIGHT);
+        }
+        if (endY < 0 || py < 0) {
+            drawViewLine(px, py + SCREEN_HEIGHT, endX, endY + SCREEN_HEIGHT);
+        }
+    }
+};
+
+vector<Triangle> generateTriangles(int numTriangles, double view_angle,  double velocity) {
+    vector<Triangle> triangles;
+    for (int i = 0; i < numTriangles; ++i) {
+        double search_radius = randomInt(15, 23);
+        triangles.push_back(Triangle(view_angle, search_radius, velocity));
+    }
+    return triangles;
+}
+
+struct pair_hash {
+    template <class T1, class T2>
+    size_t operator () (const pair<T1, T2>& p) const {
+        auto h1 = hash<T1>{}(p.first);
+        auto h2 = hash<T2>{}(p.second);
+
+        return h1 ^ h2;
+    }
+};
+
+class SpatialHash {
+private:
+    const int CELL_SIZE = SEARCH_RADIUS*2;  // Adjust based on your needs
+    unordered_map<pair<int, int>, vector<Triangle*>, pair_hash> table;
+
+    pair<int, int> hash(double px, double py) {
+        return { int(px / CELL_SIZE), int(py / CELL_SIZE) };
+    }
+
+public:
+    void insert(Triangle* triangle) {
+        auto cell = hash(triangle->getPx(), triangle->getPy());
+        table[cell].push_back(triangle);
+    }
+
+    vector<Triangle*> getNearby(Triangle* triangle) {
+        auto cell = hash(triangle->getPx(), triangle->getPy());
+        vector<Triangle*> nearby;
+
+        // Check neighboring cells
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                auto neighboringCell = make_pair(cell.first + dx, cell.second + dy);
+                if (table.count(neighboringCell)) {
+                    for (Triangle* c : table[neighboringCell]) {
+                        if (c != triangle) {
+                            nearby.push_back(c);
+                        }
+                    }
+                }
+            }
+        }
+
+        return nearby;
+    }
+
+    void clear() {
+        table.clear();
+    }
+};
+
+bool viewing(const Triangle& triangle1, const Triangle& triangle2) {
+    vector<pair<double, double>> offsets = {
+        {0, 0},
+        {SCREEN_WIDTH, 0},
+        {-SCREEN_WIDTH, 0},
+        {0, SCREEN_HEIGHT},
+        {0, -SCREEN_HEIGHT},
+        {SCREEN_WIDTH, SCREEN_HEIGHT},
+        {-SCREEN_WIDTH, SCREEN_HEIGHT},
+        {SCREEN_WIDTH, -SCREEN_HEIGHT},
+        {-SCREEN_WIDTH, -SCREEN_HEIGHT}
+    };
+
+    for (const auto& [offsetX, offsetY] : offsets) {
+        // Calculate the vector between the positions of the two triangles considering the offset
+        double dx = (triangle2.getPx() + offsetX) - triangle1.getPx();
+        double dy = (triangle2.getPy() + offsetY) - triangle1.getPy();
+
+        // Calculate the distance between the two triangles using the Pythagorean theorem
+        double distance = sqrt(dx * dx + dy * dy);
+
+        // Check if the search radii of the two triangles overlap
+        if (distance > triangle1.getSearchRadius()) {
+            continue;
+        }
+
+        // Normalize the vector from triangle1 to triangle2
+        double magnitude = sqrt(dx * dx + dy * dy);
+        double nx = dx / magnitude;
+        double ny = dy / magnitude;
+
+        // Compute the dot product between the normalized vector and triangle1's viewing direction
+        double dot = nx * triangle1.getVx() + ny * triangle1.getVy();
+
+        // The dot product is equivalent to cos(theta), where theta is the angle between the two vectors.
+        // Compute the cosine of the maximum allowable angle (which is half of the view angle)
+        double maxCosAngle = cos(triangle1.getViewAngle() / 2 * M_PI / 180.0);  // Convert to radians
+
+        // If the dot product is greater than maxCosAngle, then the angle between the two vectors is within the view angle.
+        if (dot >= maxCosAngle) {
+            return true;
+        }
+    }
+    return false;
+}
+
+double weightR(const Triangle& triangle1, const Triangle& triangle2) {
+    vector<pair<double, double>> offsets = {
+        {0, 0},
+        {SCREEN_WIDTH, 0},
+        {-SCREEN_WIDTH, 0},
+        {0, SCREEN_HEIGHT},
+        {0, -SCREEN_HEIGHT},
+        {SCREEN_WIDTH, SCREEN_HEIGHT},
+        {-SCREEN_WIDTH, SCREEN_HEIGHT},
+        {SCREEN_WIDTH, -SCREEN_HEIGHT},
+        {-SCREEN_WIDTH, -SCREEN_HEIGHT}
+    };
+
+    double minDistance = numeric_limits<double>::max(); // Start with a very large value
+
+    for (const auto& [offsetX, offsetY] : offsets) {
+        // Calculate the vector between the positions of the two triangles considering the offset
+        double dx = (triangle2.getPx() + offsetX) - triangle1.getPx();
+        double dy = (triangle2.getPy() + offsetY) - triangle1.getPy();
+
+        // Calculate the distance between the two triangles using the Pythagorean theorem
+        double distance = sqrt(dx * dx + dy * dy);
+        minDistance = min(minDistance, distance); // Update minDistance with the smallest found so far
+    }
+
+    // Now, use the minDistance for your calculations
+    double normalizedDistance = minDistance / triangle1.getSearchRadius();
+
+    // Use a power function for the weight calculation
+    const double exponent = 0.005* WEIGHT_STRENGTH; // Adjust this value as needed to get the desired curve
+    double weight = 1.0 - pow(normalizedDistance, exponent);
+
+    return weight;
+}
+
+double weightAngle(const Triangle& triangle1, const Triangle& triangle2) {
+    // Define all possible offsets for wrapping around the screen edges
+    vector<pair<double, double>> offsets = {
+        {0, 0},
+        {SCREEN_WIDTH, 0},
+        {-SCREEN_WIDTH, 0},
+        {0, SCREEN_HEIGHT},
+        {0, -SCREEN_HEIGHT},
+        {SCREEN_WIDTH, SCREEN_HEIGHT},
+        {-SCREEN_WIDTH, SCREEN_HEIGHT},
+        {SCREEN_WIDTH, -SCREEN_HEIGHT},
+        {-SCREEN_WIDTH, -SCREEN_HEIGHT}
+    };
+
+    double minDistance = numeric_limits<double>::max(); // Start with a very large value
+    pair<double, double> bestOffset = { 0, 0 }; // Default to no offset
+
+    // Find the offset that gives the minimum distance
+    for (const auto& [offsetX, offsetY] : offsets) {
+        double dx = (triangle2.getPx() + offsetX) - triangle1.getPx();
+        double dy = (triangle2.getPy() + offsetY) - triangle1.getPy();
+        double distance = sqrt(dx * dx + dy * dy);
+        if (distance < minDistance) {
+            minDistance = distance;
+            bestOffset = { offsetX, offsetY };
+        }
+    }
+
+    // Calculate the vector from triangle1 to triangle2 using the best offset
+    double dx = (triangle2.getPx() + bestOffset.first) - triangle1.getPx();
+    double dy = (triangle2.getPy() + bestOffset.second) - triangle1.getPy();
+
+    // Normalize the vector
+    double magnitude = sqrt(dx * dx + dy * dy);
+    if (magnitude == 0.0) return numeric_limits<double>::infinity();  // Avoid division by zero
+
+    double nx = dx / magnitude;
+    double ny = dy / magnitude;
+
+    // Compute the dot product between the normalized vector and triangle1's viewing direction
+    double dot = nx * triangle1.getVx() + ny * triangle1.getVy();
+
+    // Clamp the dot product to the range [-1, 1] to ensure a valid angle
+    dot = max(-1.0, min(1.0, dot));
+
+    // Compute the angle between the two vectors using the inverse cosine (acos) function
+    double angle = acos(dot);
+    
+    // Convert angle from radians to degrees
+    angle = angle * 180.0 / M_PI;
+    //cout << angle << endl;
+   
+    // Use a power function for the weight calculation
+    double maxAngle = triangle1.getViewAngle() / 2.0;
+    const double exponent = 0.001* WEIGHT_STRENGTH; // Adjust this value as needed to get the desired curve
+    double weight = 1.0 - pow((angle / maxAngle), exponent);
+    //cout << weight << endl;
+
+    return weight;
+}
+
+double dampenRotation(double rotation) {
+    if (rotation <= 1.8) return rotation;
+    if (rotation >= 1.8) return 1.85;
+    
+}
+
+void rotateTriangle(Triangle& triangle1, const Triangle& triangle2, double r_weight, double angle_weight) {
+    // Calculate the vector from triangle1 to triangle2
+    double dx = triangle2.getPx() - triangle1.getPx();
+    double dy = triangle2.getPy() - triangle1.getPy();
+
+    // Normalize the vector
+    double magnitude = sqrt(dx * dx + dy * dy);
+    if (magnitude == 0.0) return;  // Avoid division by zero
+
+    double nx = dx / magnitude;
+    double ny = dy / magnitude;
+
+    // Compute the dot and cross product between the normalized vector and triangle1's viewing direction
+    double dot = nx * triangle1.getVx() + ny * triangle1.getVy();
+    double cross = nx * triangle1.getVy() - ny * triangle1.getVx();
+
+    // Compute the angle in radians using atan2, ensuring it's between [-π, π]
+    double angle = atan2(cross, dot);
+
+    // Convert the angle to degrees (if you prefer working in degrees)
+    angle = angle * 180.0 / M_PI;
+
+    // Average the weights and scale the angle
+    double weight_avg = (r_weight + angle_weight) / 2.0;
+    double rotation = angle * weight_avg;
+    rotation = dampenRotation(rotation);
+    //cout << rotation << endl;
+
+    // Convert rotation back to radians for the rotation calculations
+    rotation = rotation * M_PI / 180.0;
+    //rotation *= -1;
+    //rotation += randomInt(-500, 500) / 2000;
+    
+    // Rotate the triangle1's viewing vector
+    double new_vx = triangle1.getVx() * cos(rotation) - triangle1.getVy() * sin(rotation);
+    double new_vy = triangle1.getVx() * sin(rotation) + triangle1.getVy() * cos(rotation);
+
+    // Update triangle1's viewing vector
+    triangle1.setVx(new_vx);
+    triangle1.setVy(new_vy);
+}
+
+void repulsion(Triangle& triangle, double x, double y, double strength, double radius) {
+    vector<pair<double, double>> offsets = {
+        {0, 0},
+        {SCREEN_WIDTH, 0},
+        {-SCREEN_WIDTH, 0},
+        {0, SCREEN_HEIGHT},
+        {0, -SCREEN_HEIGHT},
+        {SCREEN_WIDTH, SCREEN_HEIGHT},
+        {-SCREEN_WIDTH, SCREEN_HEIGHT},
+        {SCREEN_WIDTH, -SCREEN_HEIGHT},
+        {-SCREEN_WIDTH, -SCREEN_HEIGHT}
+    };
+
+    double closestDistance = numeric_limits<double>::max();
+    pair<double, double> closestOffset = { 0, 0 };
+
+    for (const auto& [offsetX, offsetY] : offsets) {
+        // Calculate the distance from the triangle's position to the repulsion point (x, y) considering the offset
+        double dx = (x + offsetX) - triangle.getPx();
+        double dy = (y + offsetY) - triangle.getPy();
+        double distance = sqrt(dx * dx + dy * dy);
+
+        // Check if this offset results in a closer distance
+        if (distance < closestDistance) {
+            closestDistance = distance;
+            closestOffset = { offsetX, offsetY };
+        }
+    }
+
+    // If the triangle is outside the closest repulsion radius, set its velocity to the initial value and return
+    if (closestDistance > radius) {
+        triangle.setVelocity(VELOCITY);
+        return;
+    }
+
+    // Adjust velocity based on the closest distance
+    double velocityMultiplier = 1 + 6 * (1 - (closestDistance / radius)); // Scales from 1 (at radius) to 3 (at the exact point)
+    triangle.setVelocity(VELOCITY * velocityMultiplier);
+
+    double dx = (x + closestOffset.first) - triangle.getPx();
+    double dy = (y + closestOffset.second) - triangle.getPy();
+
+    // Normalize the direction vector from the triangle to the repulsion point
+    if (closestDistance != 0) {
+        dx /= closestDistance;
+        dy /= closestDistance;
+    }
+
+    // Calculate the dot product to get the cosine of the angle between the viewing direction and the repulsion direction
+    double dot = dx * triangle.getVx() + dy * triangle.getVy();
+
+    // If the triangle is already facing away from the repulsion point, return
+    if (dot <= 0) return;
+
+    // Calculate the rotation angle based on strength and how close the triangle is to the repulsion point
+    double rotation = strength * (1 - closestDistance / radius) * M_PI;  // Rotation in radians
+
+    // To repel the triangle, rotate its viewing direction away from the repulsion direction
+    double cosRot = cos(rotation);
+    double sinRot = sin(rotation);
+
+    double new_vx = triangle.getVx() * cosRot + triangle.getVy() * sinRot;
+    double new_vy = triangle.getVy() * cosRot - triangle.getVx() * sinRot;
+
+    // Update the triangle's viewing direction
+    triangle.setVx(new_vx);
+    triangle.setVy(new_vy);
+}
+
+
+
+int main(int argc, char* argv[]) {
+    // Initialize SDL
+    SDL_Init(SDL_INIT_VIDEO);
+    // Create a window
+    SDL_Window* window = SDL_CreateWindow("SeekingTriangles", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+    // Create a renderer
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+
+    // Create a vector of Triangle objects
+    vector<Triangle> triangles = generateTriangles(TRIANGLES, VIEW_ANGLE, VELOCITY);
+
+    // Variables for FPS calculation
+    int frameCount = 0;
+    Uint32 startTime = SDL_GetTicks();
+    Uint32 currentTime = 0;
+
+    // Run the game loop
+    bool quit = false;
+    while (!quit) {
+        //Uint32 frameStartTime = SDL_GetTicks();  // Get the start time of this frame
+        // Handle events
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                quit = true;
+            }
+        }
+        // Clear the screen
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+
+        //--------------------------------------------------
+
+
+        // spatial hash creation and insertion
+        SpatialHash spatialHash;
+        for (auto& triangle : triangles) {
+            spatialHash.insert(&triangle);
+        }
+
+        //***********DRAWING***********//
+        // draw triangles 
+        for (auto& triangle : triangles) {
+            triangle.draw(renderer, 255, 255, 255, 255);
+            //triangle.drawViewR(renderer);
+        }
+
+        //***********PHYSICS***********//
+        int mouseX, mouseY;
+        SDL_GetMouseState(&mouseX, &mouseY);
+        for (auto& triangle : triangles) {
+            //repulsion force
+            repulsion(triangle, mouseX, mouseY, 0.1,  200);
+            //get triangles in the same spatial cell
+            vector<Triangle*> nearbyTriangles = spatialHash.getNearby(&triangle);
+            for (Triangle* nearbyTriangle : nearbyTriangles) {
+                if (viewing(triangle,*nearbyTriangle)) {
+                    //SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
+                    //SDL_RenderDrawLine(renderer, triangles[i].getPx(), triangles[i].getPy(), triangles[j].getPx(), triangles[j].getPy());
+                    //calc new viewing vector
+                    double r_weight = weightR(triangle, *nearbyTriangle);
+                    double angle_weight = weightAngle(triangle, *nearbyTriangle);
+                    rotateTriangle(triangle, *nearbyTriangle, r_weight, angle_weight);
+                }
+            }
+        }
+
+        // Clear the hash for the next iteration
+        spatialHash.clear();
+
+        //move triangles
+        for (auto& triangle : triangles) { triangle.move(); }
+
+
+
+
+
+
+
+        //--------------------------------------------------
+        
+        //update screen
+        SDL_RenderPresent(renderer);
+        // At the end of the game loop
+        frameCount++;
+        // Check if a second has passed; if so, display the FPS
+        currentTime = SDL_GetTicks();
+        if (currentTime - startTime >= 1000) {  // one second in milliseconds
+            cout << "FPS: " << frameCount << endl;
+            // Reset frame count and set new start time
+            frameCount = 0;
+            startTime = SDL_GetTicks();
+        }
+        /*
+        Uint32 frameEndTime = SDL_GetTicks();  // Get the end time of this frame
+        Uint32 frameDuration = frameEndTime - frameStartTime;  // Calculate how long this frame took
+
+        if (frameDuration < TARGET_FRAME_TIME) {
+            SDL_Delay(TARGET_FRAME_TIME - frameDuration);  // Delay the difference to cap at 30 FPS
+        }
+        */
+    }
+
+    // Clean up
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+
+    return 0;
+}
+
+
