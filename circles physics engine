@@ -1,0 +1,623 @@
+#include <iostream>
+#include <SDL.h>
+#include <vector>
+#include <string>
+#include <cstdlib>
+#include <ctime>
+#include <cmath>
+#include <random>
+#include <unordered_map>
+#include <unordered_set>
+using namespace std;
+
+// Returns a random integer between min and max, inclusive
+int randomInt(int min, int max) {
+    random_device rd; // obtain a random number from hardware
+    mt19937 gen(rd()); // seed the generator
+    uniform_int_distribution<> rand(min, max); // define the range
+    return rand(gen);
+}
+
+//environment variabls
+const int SCREEN_WIDTH = 1920-390;
+const int SCREEN_HEIGHT = 1080-210;
+const int PADDING = 200;
+const int CIRCLES = 3000;
+const double MAX_VEL = 0.6; //pixels per second
+const bool WallsEnabled = false;
+
+class Circle {
+private:
+    double px, py;         // Position
+    double vx, vy;         // Velocity
+    double radius;         // Radius
+
+public:
+    Circle() {
+        // Set a random radius for the circle
+        radius = randomInt(2, 3);
+
+        // Randomize the position of the circle
+        px = randomInt(PADDING + 10, SCREEN_WIDTH - PADDING - 10);
+        py = randomInt(PADDING + 10, SCREEN_HEIGHT - PADDING - 10);
+
+        // Randomize the velocity of the circle
+        vx = (double)randomInt(-400, 400) / 1000;
+        vy = (double)randomInt(-400, 400) / 1000;
+    }
+    
+    
+    // Getters
+    double getPx() const { return px; }
+    double getPy() const { return py; }
+    double getVx() const { return vx; }
+    double getVy() const { return vy; }
+    double getRadius() const { return radius; }
+    double getMass() const { return radius * 4; }
+
+
+    // Setters
+    void setPx(double val) { px = val; }
+    void setPy(double val) { py = val; }
+    void setVx(double val) { vx = val; }
+    void setVy(double val) { vy = val; }
+    void setRadius(double val) { radius = val; }
+
+
+    void move() {
+        px += vx;
+        py += vy;
+
+        
+        // Bounce off the walls
+        if (WallsEnabled) {
+            if (px - radius < 0 || px + radius > SCREEN_WIDTH) {
+                vx = -vx;
+
+                // If the circle is overlapping with the left wall
+                if (px - radius < 0) {
+                    px = radius; // move the circle to the right so that it's just touching the wall
+                }
+
+                // If the circle is overlapping with the right wall
+                if (px + radius > SCREEN_WIDTH) {
+                    px = SCREEN_WIDTH - radius; // move the circle to the left so that it's just touching the wall
+                }
+            }
+
+            if (py - radius < 0 || py + radius > SCREEN_HEIGHT) {
+                vy = -vy;
+
+                // If the circle is overlapping with the top wall
+                if (py - radius < 0) {
+                    py = radius; // move the circle downward so that it's just touching the wall
+                }
+
+                // If the circle is overlapping with the bottom wall
+                if (py + radius > SCREEN_HEIGHT) {
+                    py = SCREEN_HEIGHT - radius; // move the circle upward so that it's just touching the wall
+                }
+            }
+        }
+    }
+
+    void draw(SDL_Renderer* renderer, int r, int g, int b, int a) {
+        // Set the draw color
+        SDL_SetRenderDrawColor(renderer, r, g, b, a);
+        int diameter = (radius * 2);
+
+        int32_t x = (radius - 1);
+        int32_t y = 0;
+        int32_t tx = 1;
+        int32_t ty = 1;
+        int32_t error = (tx - diameter);
+        int32_t centreX = px;
+        int32_t centreY = py;
+
+        while (x >= y) {
+            // Each of the following renders an octant of the circle
+            SDL_RenderDrawPoint(renderer, centreX + x, centreY - y);
+            SDL_RenderDrawPoint(renderer, centreX + x, centreY + y);
+            SDL_RenderDrawPoint(renderer, centreX - x, centreY - y);
+            SDL_RenderDrawPoint(renderer, centreX - x, centreY + y);
+            SDL_RenderDrawPoint(renderer, centreX + y, centreY - x);
+            SDL_RenderDrawPoint(renderer, centreX + y, centreY + x);
+            SDL_RenderDrawPoint(renderer, centreX - y, centreY - x);
+            SDL_RenderDrawPoint(renderer, centreX - y, centreY + x);
+
+            if (error <= 0) {
+                ++y;
+                error += ty;
+                ty += 2;
+            }
+
+            if (error > 0) {
+                --x;
+                tx += 2;
+                error += (tx - diameter);
+            }
+        }
+    }
+
+    void drawVel(SDL_Renderer* renderer) {
+        SDL_RenderDrawLine(renderer, px, py, px + vx * 300, py + vy * 300);
+    }
+};
+
+struct pair_hash {
+    template <class T1, class T2>
+    std::size_t operator () (const std::pair<T1, T2>& p) const {
+        auto h1 = std::hash<T1>{}(p.first);
+        auto h2 = std::hash<T2>{}(p.second);
+
+        // Mainly for demonstration purposes, i.e. works but is overly simple
+        // In the real world, use carefully crafted, key-specific salt values, developed from
+        // random numbers or hash functions. See also: https://stackoverflow.com/a/41869403
+        return h1 ^ h2;
+    }
+};
+
+class SpatialHash {
+private:
+    const int CELL_SIZE = 8;  // Adjust based on your needs
+    std::unordered_map<std::pair<int, int>, std::vector<Circle*>, pair_hash> table;
+
+    std::pair<int, int> hash(double px, double py) {
+        return { int(px / CELL_SIZE), int(py / CELL_SIZE) };
+    }
+
+public:
+    void insert(Circle* circle) {
+        auto cell = hash(circle->getPx(), circle->getPy());
+        table[cell].push_back(circle);
+    }
+
+    std::vector<Circle*> getNearby(Circle* circle) {
+        auto cell = hash(circle->getPx(), circle->getPy());
+        std::vector<Circle*> nearby;
+
+        // Check neighboring cells
+        for (int dx = -1; dx <= 1; dx++) {
+            for (int dy = -1; dy <= 1; dy++) {
+                auto neighboringCell = std::make_pair(cell.first + dx, cell.second + dy);
+                if (table.count(neighboringCell)) {
+                    for (Circle* c : table[neighboringCell]) {
+                        if (c != circle) {
+                            nearby.push_back(c);
+                        }
+                    }
+                }
+            }
+        }
+
+        return nearby;
+    }
+
+    void clear() {
+        table.clear();
+    }
+};
+
+bool intersects(const Circle& circle1, const Circle& circle2) {
+    float dx = circle1.getPx() - circle2.getPx();
+    float dy = circle1.getPy() - circle2.getPy();
+    float distanceSquared = dx * dx + dy * dy;
+    float radiusSum = circle1.getRadius() + circle2.getRadius();
+    return distanceSquared < radiusSum* radiusSum;
+}
+
+bool isCollidingWith(const Circle& circle1, const Circle& circle2) {
+    double distance = sqrt(pow(circle1.getPx() - circle2.getPx(), 2) + pow(circle1.getPy() - circle2.getPy(), 2));
+    return distance <= circle1.getRadius() + circle2.getRadius();
+}
+
+void handleCollisionWith(Circle& a, Circle& b) {
+
+    double dx = a.getPx() - b.getPx();
+    double dy = a.getPy() - b.getPy();
+    double distance = sqrt(dx * dx + dy * dy);
+
+    double overlap = a.getRadius() + b.getRadius() - distance;
+    double angle = atan2(dy, dx);
+    double xMove = overlap * cos(angle);
+    double yMove = overlap * sin(angle);
+
+    a.setPx(a.getPx() + xMove);
+    a.setPy(a.getPy() + yMove);
+
+    // additional logic for handling dynamic collision ***VERSION 02***
+    // elastic collisions method
+
+    double sine = sin(angle);
+    double cosine = cos(angle);
+
+    // Rotate velocities
+    double avx = a.getVx();
+    double avy = a.getVy();
+    double bvx = b.getVx();
+    double bvy = b.getVy();
+
+    double vx1 = avx * cosine + avy * sine;
+    double vy1 = avy * cosine - avx * sine;
+    double vx2 = bvx * cosine + bvy * sine;
+    double vy2 = bvy * cosine - bvx * sine;
+
+    double m = a.getMass();
+    double otherM = b.getMass();
+
+    // Calculate new velocities in 1D
+    double v1 = ((m - otherM) * vx1 + 2 * otherM * vx2) / (m + otherM);
+    double v2 = ((otherM - m) * vx2 + 2 * m * vx1) / (m + otherM);
+
+    // Rotate velocities back
+    avx = v1 * cosine - vy1 * sine;
+    avy = vy1 * cosine + v1 * sine;
+    bvx = v2 * cosine - vy2 * sine;
+    bvy = vy2 * cosine + v2 * sine;
+
+    a.setVx(avx);
+    a.setVy(avy);
+    b.setVx(bvx);
+    b.setVy(bvy);
+
+    // Limit maximum velocitys
+    double currentVelocityA = sqrt(a.getVx() * a.getVx() + a.getVy() * a.getVy());
+    double currentVelocityB = sqrt(b.getVx() * b.getVx() + b.getVy() * b.getVy());
+
+    if (currentVelocityA > MAX_VEL) {
+        double scale = MAX_VEL / currentVelocityA;
+        a.setVx(a.getVx() * scale);
+        a.setVy(a.getVy() * scale);
+    }
+
+    if (currentVelocityB > MAX_VEL) {
+        double scale = MAX_VEL / currentVelocityB;
+        b.setVx(b.getVx() * scale);
+        b.setVy(b.getVy() * scale);
+    }
+}
+
+bool isCollidingWithLine(Circle& circle, double lineStartX, double lineStartY, double lineEndX, double lineEndY) {
+
+    // Calculate the distance between the circle center and the closest point on the line segment
+    double deltaX = lineEndX - lineStartX;
+    double deltaY = lineEndY - lineStartY;
+    double t = ((circle.getPx() - lineStartX) * deltaX + (circle.getPy() - lineStartY) * deltaY) / (deltaX * deltaX + deltaY * deltaY);
+    t = max(0.0, min(1.0, t));  // Clamp t to [0,1] to handle points outside the line segment
+    double closestX = lineStartX + t * deltaX;
+    double closestY = lineStartY + t * deltaY;
+    double distance = sqrt((circle.getPx() - closestX) * (circle.getPx() - closestX) + (circle.getPy() - closestY) * (circle.getPy() - closestY));
+
+    // Check if the circle is intersecting with the line
+    if (distance <= circle.getRadius()) {
+        // Calculate the vector between the circle center and the closest point on the line segment
+        double dx = closestX - circle.getPx();
+        double dy = closestY - circle.getPy();
+
+        // Calculate the length of the overlap between the circle and the line
+        double overlap = circle.getRadius() - distance;
+
+        // Calculate the length of the vector
+        double length = sqrt(dx * dx + dy * dy);
+
+        // Move the circle away from the line by the overlap distance
+        circle.setPx(circle.getPx() - dx / length * overlap);
+        circle.setPy(circle.getPy() - dy / length * overlap);
+
+        // Calculate the normal vector of the line
+        double normalX = deltaY;
+        double normalY = -deltaX;
+        double normalLength = sqrt(normalX * normalX + normalY * normalY);
+        normalX /= normalLength;
+        normalY /= normalLength;
+
+        // Calculate the dot product of the circle's velocity and the normal vector
+        double dotProduct = circle.getVx() * normalX + circle.getVy() * normalY;
+
+        // Calculate the new velocity vector after the collision
+        circle.setVx(circle.getVx() - 2 * dotProduct * normalX);
+        circle.setVy(circle.getVy() - 2 * dotProduct * normalY);
+        return true;
+    }
+    return false;
+}
+
+void applyForce(Circle& circle, double forceX, double forceY, double strength, double spread, double minDistance) {
+    double distance = sqrt(pow(circle.getPx() - forceX, 2) + pow(circle.getPy() - forceY, 2));
+    double angle = atan2(circle.getPy() - forceY, circle.getPx() - forceX);
+
+    double forceMagnitude = strength / pow(distance, spread);
+    if (distance < minDistance) {
+        forceMagnitude *= distance / minDistance;
+    }
+
+    double forceXComponent = forceMagnitude * cos(angle);
+    double forceYComponent = forceMagnitude * sin(angle);
+
+    circle.setVx(circle.getVx() - forceXComponent);
+    circle.setVy(circle.getVy() - forceYComponent);
+}
+
+void apply_curl_forces(Circle& circle, double center_x, double center_y, double strength, double falloff) {
+    // Calculate the displacement vector from the circle's center to the rotation center
+    double displacement_x = center_x - circle.getPx();
+    double displacement_y = center_y - circle.getPy();
+
+    // Calculate the distance from the circle to the center
+    double distance = sqrt(displacement_x * displacement_x + displacement_y * displacement_y);
+
+    // Avoid division by zero (if circle is exactly at the rotation center, don't apply any force)
+    if (distance == 0) return;
+
+    // Find a unit vector perpendicular to the displacement vector for counter-clockwise rotation
+    double perpendicular_x = -displacement_y / distance;
+    double perpendicular_y = displacement_x / distance;
+
+    // Calculate the curl force based on the perpendicular vector, strength, and scaled by the inverse of the distance raised to the falloff power
+    double scaled_strength = strength / pow(distance, falloff);
+    double curl_force_x = scaled_strength * perpendicular_x;
+    double curl_force_y = scaled_strength * perpendicular_y;
+
+    // Update the circle's velocity based on the curl force
+    circle.setVx(circle.getVx() + curl_force_x);
+    circle.setVy(circle.getVy() + curl_force_y);
+}
+
+void apply_friction_between_circles(Circle& circle1, Circle& circle2, double friction_coefficient) {
+    // Calculate the relative velocity of the two circles
+    double relative_vx = circle2.getVx() - circle1.getVx();
+    double relative_vy = circle2.getVy() - circle1.getVy();
+
+    // Calculate the normal vector to the collision plane
+    double nx = circle2.getPx() - circle1.getPx();
+    double ny = circle2.getPy() - circle1.getPy();
+    double length = sqrt(nx * nx + ny * ny);
+    nx /= length;
+    ny /= length;
+
+    // Calculate the magnitude of the relative velocity in the normal direction
+    double normal_relative_velocity = nx * relative_vx + ny * relative_vy;
+
+    // Calculate the inverse mass
+    double mass_inv1 = 1.0 / circle1.getMass();
+    double mass_inv2 = 1.0 / circle2.getMass();
+
+    // Calculate the magnitude of the impulse
+    double impulse_magnitude = -((0.01) * normal_relative_velocity) / (mass_inv1 + mass_inv2);
+
+    // Apply the impulse to the circles
+    circle1.setVx(circle1.getVx() - impulse_magnitude * mass_inv1 * nx);
+    circle1.setVy(circle1.getVy() - impulse_magnitude * mass_inv1 * ny);
+    circle2.setVx(circle2.getVx() + impulse_magnitude * mass_inv2 * nx);
+    circle2.setVy(circle2.getVy() + impulse_magnitude * mass_inv2 * ny);
+
+    // Calculate the tangent vector to the collision plane
+    double tx = -ny;
+    double ty = nx;
+
+    // Calculate the magnitude of the relative velocity in the tangent direction
+    double tangent_relative_velocity = tx * relative_vx + ty * relative_vy;
+
+    // Calculate the magnitude of the frictional impulse
+    double friction_impulse_magnitude = -friction_coefficient * impulse_magnitude;
+
+    // Apply the frictional impulse to the circles
+    double friction_impulse_x = friction_impulse_magnitude * tx;
+    double friction_impulse_y = friction_impulse_magnitude * ty;
+
+    // Adjust the velocities of the circles
+    circle1.setVx(circle1.getVx() - friction_impulse_x * mass_inv1);
+    circle1.setVy(circle1.getVy() - friction_impulse_y * mass_inv1);
+    circle2.setVx(circle2.getVx() + friction_impulse_x * mass_inv2);
+    circle2.setVy(circle2.getVy() + friction_impulse_y * mass_inv2);
+}
+
+void apply_air_resistance_force(Circle& circle, double air_density, double drag_coefficient) {
+    // Calculate the magnitude of the velocity vector
+    double speed = sqrt(circle.getVx() * circle.getVx() + circle.getVy() * circle.getVy());
+
+    // Handle the case when speed is zero to avoid division by zero
+    if (speed == 0) return;
+
+    // Calculate the unit vector of the velocity vector
+    double unit_vx = circle.getVx() / speed;
+    double unit_vy = circle.getVy() / speed;
+
+    // Calculate the drag force
+    double drag_force = 0.5 * air_density * drag_coefficient * speed * speed;
+
+    // Apply the drag force in the opposite direction of the velocity vector
+    circle.setVx(circle.getVx() - drag_force * unit_vx);
+    circle.setVy(circle.getVy() - drag_force * unit_vy);
+
+    // Uncomment this if you want to print out the values
+    // cout << speed << "  " << drag_force << "  " << drag_force * unit_vx << "  " << drag_force * unit_vy << endl;
+}
+
+
+int main(int argc, char* argv[]) {
+    // Initialize SDL
+    SDL_Init(SDL_INIT_VIDEO);
+
+    // Create a window
+    SDL_Window* window = SDL_CreateWindow("Bouncing Circles", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+
+    // Create a renderer
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+
+    // Create an array of circles
+    Circle circles[CIRCLES];
+    int numCircles = CIRCLES;
+
+    // Variables for FPS calculation
+    int frameCount = 0;
+    Uint32 startTime = SDL_GetTicks();
+    Uint32 currentTime = 0;
+
+    int count = 0;
+    // Run the game loop
+    bool quit = false;
+    while (!quit) {
+        count++;
+        // Handle events
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) {
+                quit = true;
+            }
+        }
+
+        // Clear the screen
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+        SDL_RenderClear(renderer);
+
+        //***********DRAWING***********//
+        
+        // draw circles 
+        for (int i = 0; i < numCircles; i++) {
+            circles[i].draw(renderer, 255, 255, 255, 255);
+            //circles[i].drawVel(renderer);
+        }
+
+        // line points 
+        int padd = 600;
+        int A[] = { padd + 0, padd/1.2 + 0 };
+        int B[] = { padd + 100, A[1] + 0};
+        int C[] = { SCREEN_WIDTH - padd, SCREEN_HEIGHT - padd/1.2 };
+        int D[] = { SCREEN_WIDTH - B[0], C[1]};
+
+
+        // drawing lines
+        /*
+        SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
+        SDL_RenderDrawLine(renderer, A[0], A[1], B[0], B[1]);
+        SDL_RenderDrawLine(renderer, A[0], A[1], D[0], D[1]);
+        SDL_RenderDrawLine(renderer, B[0], B[1], C[0], C[1]);
+        SDL_RenderDrawLine(renderer, C[0], C[1], D[0], D[1]);
+
+        SDL_RenderDrawLine(renderer, A[0], C[1], B[0], C[1]);
+        SDL_RenderDrawLine(renderer, A[0], C[1], D[0], A[1]);
+        SDL_RenderDrawLine(renderer, B[0], C[1], C[0], A[1]);
+        SDL_RenderDrawLine(renderer, C[0], A[1], D[0], A[1]);
+        */
+
+        // Get mouse position
+        int mouseX, mouseY;
+        Uint32 mouseState = SDL_GetMouseState(&mouseX, &mouseY);
+
+        SpatialHash spatialHash;
+
+        // Insert circles into hash
+        for (int i = 0; i < numCircles; i++) {
+            spatialHash.insert(&circles[i]);
+        }
+
+        //***********PHYSICS***********//
+        //collisiondetection between circles
+        for (int i = 0; i < numCircles; i++) {  
+
+            //Applying Forces
+            applyForce(circles[i], SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, 0.2, 1, 2);
+            apply_air_resistance_force(circles[i], 0.1, 0.01);
+            if (count >= 400) {
+                apply_curl_forces(circles[i], SCREEN_WIDTH/2, SCREEN_HEIGHT/2, 0.5, 1.05);
+
+            }
+            
+            //collisiondetection between circles and lines 
+            /*
+            bool wallCollision1 = isCollidingWithLine(circles[i], A[0], A[1], B[0], B[1]);
+            bool wallCollision2 = isCollidingWithLine(circles[i], A[0], A[1], D[0], D[1]);
+            bool wallCollision3 = isCollidingWithLine(circles[i], B[0], B[1], C[0], C[1]);
+            bool wallCollision4 = isCollidingWithLine(circles[i], C[0], C[1], D[0], D[1]);
+
+            bool wallCollision5 = isCollidingWithLine(circles[i], A[0], C[1], B[0], C[1]);
+            bool wallCollision6 = isCollidingWithLine(circles[i], A[0], C[1], D[0], A[1]);
+            bool wallCollision7 = isCollidingWithLine(circles[i], B[0], C[1], C[0], A[1]);
+            bool wallCollision8 = isCollidingWithLine(circles[i], C[0], A[1], D[0], A[1]);
+            
+
+            if (wallCollision1 or wallCollision2 or wallCollision3 or wallCollision5 or wallCollision6 or wallCollision7 or wallCollision8) {
+                //circles[i].draw(renderer, 255, 0, 0, 100);
+            }
+            */
+            //draw collisions red
+            //SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
+            //circles[i].draw(renderer);        
+
+            //get circles in the same spatial cell
+            vector<Circle*> nearbyCircles = spatialHash.getNearby(&circles[i]);
+
+            for (Circle* nearbyCircle : nearbyCircles) {
+                if (&circles[i] != nearbyCircle && isCollidingWith(circles[i], *nearbyCircle)) {
+                    //draw collisions red
+                    //SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255); 
+                    //circles[i].draw(renderer);
+                    //circles[j].draw(renderer);
+                    //SDL_RenderDrawLine(renderer, circles[i].px, circles[i].py, circles[j].px, circles[j].py);
+
+                    //collision handling
+                    handleCollisionWith(circles[i], *nearbyCircle);
+
+                    //friction forces
+                    apply_friction_between_circles(circles[i], *nearbyCircle, 4);
+                }
+            } 
+        }
+
+        // Clear the hash for the next iteration
+        spatialHash.clear();
+
+        //move circles
+        for (int i = 0; i < numCircles; i++) {circles[i].move();}
+
+        //update screen
+        SDL_RenderPresent(renderer);
+
+        // At the end of the game loop
+        frameCount++;
+
+        // Check if a second has passed; if so, display the FPS
+        currentTime = SDL_GetTicks();
+        if (currentTime - startTime >= 1000) {  // one second in milliseconds
+            cout << "FPS: " << frameCount << endl;
+
+            // Reset frame count and set new start time
+            frameCount = 0;
+            startTime = SDL_GetTicks();
+        }
+    }
+
+    // Clean up
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+
+    return 0;
+}
+
+//overview
+/*
+game loop {
+
+// Clear the screen
+
+
+// draw circles
+// draw lines
+
+for substepps{
+//collisiondetection between circles
+
+//collisiondetection between circles and lines
+
+// Get mouse position and apply forces
+
+// Move the circles
+}
+
+
+// Update the screen
+
+}
+*/
