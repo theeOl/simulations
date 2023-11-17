@@ -1,0 +1,423 @@
+#include <GLFW/glfw3.h>
+#include <iostream>
+#include <chrono>
+#include <vector>
+#include <sstream>
+
+using namespace std;
+using namespace std::chrono;
+
+const double M_PI = 3.14159265359;
+
+
+    /* 
+    Eulerian fluid simulator with navier stokes equations. 
+    Semi-Lagrangian advection method.
+    Bilinear interpolation for tracing backwards.
+    Central difference scheme for diffusion.
+    Explicit time stepping using the computed Laplacian. 
+    Gauss Seidel method for PPE.
+    */
+
+    /*  
+    On a staggered grid, different components of the velocity field are stored on the edges of the grid cells, 
+    while scalar quantities (like pressure) are stored at the cell centers.
+    For a 2D grid, the u component of velocity (horizontal component) is stored on the vertical edges of the cells, 
+    and the v component (vertical component) is stored on the horizontal edges.
+    */
+
+const int width = 128*4;
+const int height = 128*4;
+
+double dt = 0.01;
+const double diffusion_rate = 0.1;
+const int gauss_seidel_iterations = 15;
+
+
+enum GridType {
+    staggered_u,
+    staggered_v,
+    standard
+};
+
+class Grid {
+private:
+    vector<vector<double>> data;
+    int width;
+    int height;
+    GridType type;
+
+public:
+    // Constructor
+    Grid(GridType type, int width, int height) : type(type), width(width), height(height) {
+        // For staggered grids, we add one additional row or column
+        // depending on the velocity component direction.
+        int dataWidth = type == staggered_u ? width + 1 : width;
+        int dataHeight = type == staggered_v ? height + 1 : height;
+
+        data = vector<vector<double>>(dataHeight, vector<double>(dataWidth, 0.0));
+    }
+
+    // Helper function to format your error message
+    string format_error_message(int x, int y, const char* file, int line, const char* func) const {
+        ostringstream oss;
+        oss << "Error: Index out of bounds!"
+            << " Tried to access: (" << x << ", " << y << ")"
+            << " in function " << func
+            << " at " << file << ":" << line << endl;
+        return oss.str();
+    }
+
+    // Non-const accessor with bounds checking
+    double& at(int x, int y) {
+        int adjustedWidth = (type == staggered_u) ? width + 1 : width;
+        int adjustedHeight = (type == staggered_v) ? height + 1 : height;
+
+        if (x < 0 || x >= adjustedWidth || y < 0 || y >= adjustedHeight) {
+            cerr << format_error_message(x, y, __FILE__, __LINE__, __func__);
+            static double fallback_value = 0.0;
+            return fallback_value;
+        }
+        return data[y][x];
+    }
+
+    // Const accessor with bounds checking
+    const double& at(int x, int y) const {
+        int adjustedWidth = (type == staggered_u) ? width + 1 : width;
+        int adjustedHeight = (type == staggered_v) ? height + 1 : height;
+
+        if (x < 0 || x >= adjustedWidth || y < 0 || y >= adjustedHeight) {
+            cerr << format_error_message(x, y, __FILE__, __LINE__, __func__);
+            static const double fallback_value = 0.0;
+            return fallback_value;
+        }
+        return data[y][x];
+    }
+
+
+    // Getters for grid dimensions
+    int getWidth() const {
+        return width;
+    }
+
+    int getHeight() const {
+        return height;
+    }
+};
+
+double bilinearInterpolate(const Grid& grid, double x, double y) {
+    // Ensure the coordinates are within the bounds of the grid.
+    x = max(0.0, min(static_cast<double>(grid.getWidth() - 1), x));
+    y = max(0.0, min(static_cast<double>(grid.getHeight() - 1), y));
+
+    // Calculate the integer parts of x and y.
+    int x0 = floor(x);
+    int y0 = floor(y);
+
+    // Calculate the next grid points ensuring not to exceed the grid bounds.
+    int x1 = min(x0 + 1, grid.getWidth() - 1);
+    int y1 = min(y0 + 1, grid.getHeight() - 1);
+
+    // Compute the interpolation coefficients.
+    double xFrac = x - x0;
+    double yFrac = y - y0;
+
+    // Get the values at the corner points of the cell.
+    double s1 = grid.at(x0, y0) * (1 - xFrac) * (1 - yFrac);
+    double s2 = grid.at(x1, y0) * xFrac * (1 - yFrac);
+    double s3 = grid.at(x0, y1) * (1 - xFrac) * yFrac;
+    double s4 = grid.at(x1, y1) * xFrac * yFrac;
+
+    // Combine the values to get the interpolated value.
+    return s1 + s2 + s3 + s4;
+}
+
+void advect(Grid& velocity, double dt, const Grid& u_velocity, const Grid& v_velocity) {
+    for (int j = 0; j < velocity.getHeight(); ++j) {
+        for (int i = 0; i < velocity.getWidth(); ++i) {
+            // Trace back the particle position
+            double x = i - u_velocity.at(i, j) * dt;
+            double y = j - v_velocity.at(i, j) * dt;
+
+            // Clamp the coordinates to be within the bounds of the grid
+            x = max(0.0, min(x, static_cast<double>(velocity.getWidth() - 1)));
+            y = max(0.0, min(y, static_cast<double>(velocity.getHeight() - 1)));
+
+            // Interpolate the velocity from the previous time step
+            velocity.at(i, j) = bilinearInterpolate(u_velocity, x, y);
+        }
+    }
+}
+
+void diffuse(Grid& velocity, double diffusion_rate, double dt) {
+    Grid velocity_copy = velocity; // Make a copy of the velocity grid to work from the previous state
+
+    for (int j = 1; j < velocity.getHeight() - 1; ++j) {
+        for (int i = 1; i < velocity.getWidth() - 1; ++i) {
+            velocity.at(i, j) = (
+                velocity_copy.at(i, j) +
+                diffusion_rate * dt * (
+                    velocity_copy.at(i + 1, j) +
+                    velocity_copy.at(i - 1, j) +
+                    velocity_copy.at(i, j + 1) +
+                    velocity_copy.at(i, j - 1) -
+                    4 * velocity_copy.at(i, j)
+                    )
+                );
+        }
+    }
+}
+
+Grid computePPEsource(const Grid& u_velocity, const Grid& v_velocity) {
+    int width = u_velocity.getWidth();
+    int height = u_velocity.getHeight();
+
+    Grid source(standard, width, height);
+
+    for (int j = 1; j < height - 1; ++j) {
+        for (int i = 1; i < width - 1; ++i) {
+            // Compute the divergence
+            double du_dx = (u_velocity.at(i + 1, j) - u_velocity.at(i, j));
+            double dv_dy = (v_velocity.at(i, j + 1) - v_velocity.at(i, j));
+
+            // The source term is the negative divergence
+            source.at(i, j) = -(du_dx + dv_dy);
+        }
+    }
+
+    return source;
+}
+
+void gaussSeidelPressureSolver(Grid& pressure, const Grid& source, int iterations, double alpha = 0.1) {
+    int width = pressure.getWidth();
+    int height = pressure.getHeight();
+
+    for (int iter = 0; iter < iterations; ++iter) {
+        for (int j = 1; j < height - 1; ++j) {
+            for (int i = 1; i < width - 1; ++i) {
+                pressure.at(i, j) = (1 - alpha) * pressure.at(i, j) + alpha * 0.25 * (
+                    pressure.at(i + 1, j) + pressure.at(i - 1, j) +
+                    pressure.at(i, j + 1) + pressure.at(i, j - 1) -
+                    source.at(i, j)
+                    );
+            }
+        }
+        // Boundary conditions for the pressure should be applied here if necessary
+    }
+}
+
+void project(Grid& u_velocity, Grid& v_velocity, const Grid& pressure) {
+    double h = 1.0; // This should be set to your grid cell size, assuming it's uniform
+
+    // Compute the gradient of the pressure (gradP) and subtract it from the velocities
+    for (int j = 1; j < u_velocity.getHeight() - 1; ++j) {
+        for (int i = 1; i < u_velocity.getWidth() - 1; ++i) {
+            // For u-velocity (horizontal component), we only consider the horizontal pressure gradient
+            if (i < u_velocity.getWidth() - 2) { // Adjust to account for the staggered grid setup
+                u_velocity.at(i, j) -= (pressure.at(i + 1, j) - pressure.at(i, j)) / h;
+            }
+        }
+    }
+
+    for (int j = 1; j < v_velocity.getHeight() - 1; ++j) {
+        for (int i = 1; i < v_velocity.getWidth() - 1; ++i) {
+            // For v-velocity (vertical component), we only consider the vertical pressure gradient
+            if (j < v_velocity.getHeight() - 2) { // Adjust to account for the staggered grid setup
+                v_velocity.at(i, j) -= (pressure.at(i, j + 1) - pressure.at(i, j)) / h;
+            }
+        }
+    }
+
+    // Update the boundary conditions for the velocity fields if necessary
+    // This can be done in the enforceBoundaryConditions function
+}
+
+void enforceBoundaryConditions(Grid& grid) {
+    // Implementation for enforcing boundary conditions goes here
+    // Depending on the physical setup, boundary conditions can vary greatly
+    // Common boundary conditions are no-slip (velocity = 0 at boundary) or free-slip (no change in the parallel velocity component)
+    // For pressure, a Neumann boundary condition is often used (zero gradient at boundaries)
+}
+
+void render(const Grid& pressure) {
+    // Assuming the grid is normalized between 0 (low pressure) and 1 (high pressure)
+    glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    // Get the maximum and minimum values to normalize the pressure values
+    double minPressure = std::numeric_limits<double>::max();
+    double maxPressure = std::numeric_limits<double>::min();
+
+    for (int j = 0; j < pressure.getHeight(); ++j) {
+        for (int i = 0; i < pressure.getWidth(); ++i) {
+            double p = pressure.at(i, j);
+            if (p < minPressure) minPressure = p;
+            if (p > maxPressure) maxPressure = p;
+        }
+    }
+
+    // Avoid division by zero in normalization
+    if (minPressure == maxPressure) {
+        minPressure -= 1;
+        maxPressure += 1;
+    }
+
+    double range = maxPressure - minPressure;
+
+    // Map the pressure values to a grayscale color and draw rectangles
+    glBegin(GL_QUADS);
+    for (int j = 0; j < pressure.getHeight(); ++j) {
+        for (int i = 0; i < pressure.getWidth(); ++i) {
+            // Normalize the pressure value to [0,1]
+            double normalizedPressure = (pressure.at(i, j) - minPressure) / range;
+
+            // Convert to grayscale value (black = 0, white = 1)
+            glColor3f(normalizedPressure, normalizedPressure, normalizedPressure);
+
+            // Draw a rectangle (quad) at the cell's position
+            double x = ((double)i / pressure.getWidth()) * 2.0 - 1.0; // Map to [-1, 1] range
+            double y = ((double)j / pressure.getHeight()) * 2.0 - 1.0; // Map to [-1, 1] range
+            double cellWidth = 2.0 / pressure.getWidth(); // Adjust cell width to coordinate space
+            double cellHeight = 2.0 / pressure.getHeight(); // Adjust cell height to coordinate space
+
+            // Note that y coordinate is flipped because OpenGL's origin is at the bottom left,
+            // but window coordinates usually have the origin at the top left
+            y = -y;
+
+            glVertex2d(x, y);
+            glVertex2d(x + cellWidth, y);
+            glVertex2d(x + cellWidth, y - cellHeight);
+            glVertex2d(x, y - cellHeight);
+        }
+    }
+    glEnd();
+}
+
+void advanceTime(double& dt) {
+    // Update simulation time or conditions that depend on time
+    // For example, you could implement adaptive time-stepping here
+}
+
+void simulate(Grid& u_velocity, Grid& v_velocity, Grid& pressure) {
+    // 1. Advection
+    advect(u_velocity, dt, u_velocity, v_velocity);
+    advect(v_velocity, dt, u_velocity, v_velocity);
+
+    // 2. Diffusion
+    //diffuse(u_velocity, diffusion_rate, dt);
+    //diffuse(v_velocity, diffusion_rate, dt);
+
+    // 3. Calculate Pressure
+    // The PPE source term (often based on the divergence of the intermediate velocity field) is computed first.
+    Grid ppe_source = computePPEsource(u_velocity, v_velocity);
+
+    gaussSeidelPressureSolver(pressure, ppe_source, gauss_seidel_iterations);
+
+    // 4. Pressure Projection
+    project(u_velocity, v_velocity, pressure);
+
+    // 5. Enforce Boundary Conditions
+    enforceBoundaryConditions(u_velocity);
+    enforceBoundaryConditions(v_velocity);
+    enforceBoundaryConditions(pressure); // Depending on the type of boundary condition, you might not need this for pressure.
+
+    // 6. Render/Output
+    render(pressure);
+
+    // Time-stepping
+    advanceTime(dt);
+}
+
+void setCenterVelocity(Grid& u_velocity, Grid& v_velocity, double magnitude, double directionAngleDegrees) {
+    double radians = directionAngleDegrees * M_PI / 180.0;
+    double uMag = magnitude * cos(radians); // horizontal component
+    double vMag = magnitude * sin(radians); // vertical component
+
+    int centerX = width / 2;
+    int centerY = height / 2;
+
+    // Set u component of velocity at the vertical center line
+    for (int j = 0; j < u_velocity.getHeight(); ++j) {
+        u_velocity.at(centerX, j) = uMag;
+    }
+
+    // Set v component of velocity at the horizontal center line
+    for (int i = 0; i < v_velocity.getWidth(); ++i) {
+        v_velocity.at(i, centerY) = vMag;
+    }
+}
+
+int main() {
+    // Grid initialization
+    Grid u_velocity(staggered_u, width, height);
+    Grid v_velocity(staggered_v, width, height);
+    Grid pressure(standard, width, height);
+    
+
+
+    // Set the velocity at the center of the grid
+    //setCenterVelocity(u_velocity, v_velocity, 1.0, 0.0);
+
+
+    // Increase the pressure at position
+    pressure.at(width / 2, width / 2) += 0.2;
+    pressure.at(width / 2 + 1, width / 2) += 0.2;
+    pressure.at(width / 2 - 1, width / 2) += 0.2;
+    pressure.at(width / 2, width / 2 + 1) += 0.2;
+    pressure.at(width / 2, width / 2 - 1) += 0.2;
+
+
+
+
+    // Initialize GLFW
+    if (!glfwInit()) {
+        std::cerr << "Failed to initialize GLFW" << std::endl;
+        return -1;
+    }
+
+    // Create a windowed mode window and its OpenGL context
+    GLFWwindow* window = glfwCreateWindow(width, height, "Fluid Simulation", NULL, NULL);
+    if (!window) {
+        std::cerr << "Failed to create GLFW window" << std::endl;
+        glfwTerminate();
+        return -1;
+    }
+
+    // Make the window's context current
+    glfwMakeContextCurrent(window);
+    glViewport(0, 0, width, height);
+
+
+    /* FPS calculation variables */
+    int frames = 0;
+    auto lastTime = high_resolution_clock::now();
+
+    /* Loop until the user closes the window */
+    while (!glfwWindowShouldClose(window)) {
+
+        frames++;
+
+        auto currentTime = high_resolution_clock::now();
+        duration<double> elapsed = currentTime - lastTime;
+
+        if (elapsed.count() >= 1.0) {
+            cout << frames << " FPS" << endl;
+            frames = 0;
+            lastTime = currentTime;
+        }
+
+        // Poll for and process events
+        glfwPollEvents();
+
+        // Simulate
+        simulate(u_velocity, v_velocity, pressure);
+        
+        // Swap front and back buffers
+        glfwSwapBuffers(window);
+    }
+
+    glfwTerminate();
+    return 0;
+}
+
+
