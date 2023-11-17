@@ -1,0 +1,405 @@
+#include <GLFW/glfw3.h>
+#include <iostream>
+#define _USE_MATH_DEFINES
+#include <cmath>
+#include <vector>
+#include <cstdlib>
+#include <ctime> 
+#include <algorithm>
+using namespace std;
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+int randomInt(int min, int max) { return min + (rand() % (max - min + 1));}
+
+const int TARGET_FPS = 30;
+const int GRID_SIZE = 800; 
+const int SCREEN_WIDTH = 800;
+const int SCREEN_HEIGHT = 800;
+const int PADDING = 10;
+const int PARTICLES = 100000;
+const double SENSOR_ANGLE = M_PI / 8; 
+const double SENSOR_DISTANCE = 200.0;   
+const double DECAY_RATE = 0.002; 
+const double VELOCITY = 0.1; 
+const double DEPOSIT = 0.006;
+
+class Trail {
+private:
+    vector<vector<double>> current, next;
+    GLuint textureId; // ID of the OpenGL texture
+
+    void updateTexture() const{
+        vector<unsigned char> textureData(GRID_SIZE * GRID_SIZE * 3);  // RGB values
+
+        for (int i = 0; i < GRID_SIZE; i++) {
+            for (int j = 0; j < GRID_SIZE; j++) {
+                double concentration = getConcentration(i, j);
+                unsigned char grayValue = static_cast<unsigned char>(255 * min(1.0, max(0.0, concentration)));
+                int index = 3 * (i * GRID_SIZE + j);
+                textureData[index] = grayValue;     // R
+                textureData[index + 1] = grayValue; // G
+                textureData[index + 2] = grayValue; // B
+            }
+        }
+
+        glBindTexture(GL_TEXTURE_2D, textureId);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, GRID_SIZE, GRID_SIZE, 0, GL_RGB, GL_UNSIGNED_BYTE, &textureData[0]);
+    }
+
+public:
+    Trail() : current(GRID_SIZE, vector<double>(GRID_SIZE, 0.0)),
+        next(GRID_SIZE, vector<double>(GRID_SIZE, 0.0)) {
+        glGenTextures(1, &textureId);
+        glBindTexture(GL_TEXTURE_2D, textureId);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        updateTexture();
+    }
+
+    // Get concentration at a specific location
+    double getConcentration(int x, int y) const {
+        if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE)
+            return current[y][x];
+        return -1.0;  // return -1 if out of grid bounds
+    }
+
+    // Set concentration at a specific location
+    void setConcentration(int x, int y, double concentration) {
+        if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE)
+            current[y][x] = concentration;
+    }
+
+    // Increase the concentration at a specific location by a certain amount
+    void depositPheromone(int x, int y, double amount) {
+        if (x >= 0 && x < GRID_SIZE && y >= 0 && y < GRID_SIZE)
+            current[y][x] += amount;
+    }
+
+    // Diffuse the pheromone concentration
+    void diffuse() {
+        // 3x3 Gaussian kernel for subtle diffusion
+        double kernel[3][3] = {
+            {0,  2, 0},
+            {2, 20, 2},
+            {0,  2, 0}
+        };
+
+        for (int i = 0; i < GRID_SIZE; i++) {
+            for (int j = 0; j < GRID_SIZE; j++) {
+                double sum = 0.0;
+                double weightSum = 0.0;
+
+                for (int dx = -1; dx <= 1; dx++) {
+                    for (int dy = -1; dy <= 1; dy++) {
+                        int ni = i + dx;
+                        int nj = j + dy;
+
+                        // Handle wrap-around
+                        ni = (ni + GRID_SIZE) % GRID_SIZE;
+                        nj = (nj + GRID_SIZE) % GRID_SIZE;
+
+                        sum += kernel[dx + 1][dy + 1] * current[ni][nj];
+                        weightSum += kernel[dx + 1][dy + 1];
+                    }
+                }
+
+                next[i][j] = sum / weightSum;
+            }
+        }
+
+        // Swap the grids
+        swap(current, next);
+    }
+
+
+    // Apply decay to the pheromone concentration
+    void decay(double decayRate) {
+        for (int i = 0; i < GRID_SIZE; i++) {
+            for (int j = 0; j < GRID_SIZE; j++) {
+                current[i][j] *= (1.0 - decayRate);  // Decay each cell by the specified percentage
+            }
+        }
+    }
+    // Draw the pheromone grid using OpenGL
+    void draw() const {
+        updateTexture();
+
+        glEnable(GL_TEXTURE_2D);
+        glBindTexture(GL_TEXTURE_2D, textureId);
+        glColor3f(1.0f, 1.0f, 1.0f);
+        glBegin(GL_QUADS);
+        glTexCoord2f(0.0f, 0.0f); glVertex2f(0, 0);
+        glTexCoord2f(1.0f, 0.0f); glVertex2f(SCREEN_WIDTH, 0);
+        glTexCoord2f(1.0f, 1.0f); glVertex2f(SCREEN_WIDTH, SCREEN_HEIGHT);
+        glTexCoord2f(0.0f, 1.0f); glVertex2f(0, SCREEN_HEIGHT);
+        glEnd();
+        glDisable(GL_TEXTURE_2D);
+    }
+};
+
+class Particle {
+private:
+    double x;                // position x-coordinate
+    double y;                // position y-coordinate
+    double theta;            // heading θ in radians
+    double sensor_angle;     // sensor angle in radians
+    double sensor_distance;  // distance the sensor can detect
+    double velocity;         // speed at which the particle moves
+
+public:
+    // Default constructor
+    Particle() : x(0), y(0), theta(0), sensor_angle(1.0), sensor_distance(1.0), velocity(1.0) {}
+
+    // Parameterized constructor
+    Particle(double x, double y, double theta, double sensor_angle, double sensor_distance, double velocity)
+        : x(x), y(y), theta(theta), sensor_angle(sensor_angle), sensor_distance(sensor_distance), velocity(velocity) {}
+
+    // Getters
+    double getX() const { return x; }
+    double getY() const { return y; }
+    double getTheta() const { return theta; }
+    double getSensorAngle() const { return sensor_angle; }
+    double getSensorDistance() const { return sensor_distance; }
+    double getVelocity() const { return velocity; }
+
+    // Setters
+    void setX(double x) { this->x = x; }
+    void setY(double y) { this->y = y; }
+    void setTheta(double theta) { this->theta = theta; }
+    void setSensorAngle(double sensor_angle) { this->sensor_angle = sensor_angle; }
+    void setSensorDistance(double sensor_distance) { this->sensor_distance = sensor_distance; }
+    void setVelocity(double velocity) { this->velocity = velocity; }
+
+    // Display details of the particle
+    void display() const {
+        cout << "Particle Details:" << endl;
+        cout << "Position: (" << x << ", " << y << ")" << endl;
+        cout << "Heading θ: " << theta * (180.0 / M_PI) << " degrees" << endl;  // converting radians to degrees for display
+        cout << "Sensor Angle: " << sensor_angle * (180.0 / M_PI) << " degrees" << endl;  // converting radians to degrees for display
+        cout << "Sensor Distance: " << sensor_distance << endl;
+    }
+
+    // Display particle in OpenGL
+    void draw() const {
+        // Set the color to red
+        glColor3f(1.0f, 0.0f, 0.0f);
+
+        // Render the particle as a point at its (x, y) position
+        glPointSize(5.0f);
+        glBegin(GL_POINTS);
+        glVertex2d(x, y);
+        glEnd();
+    }
+
+    // Update particle's position based on the pheromone concentrations
+    void move(Trail& trail) {
+        // Calculate positions of sensors
+        double leftSensorX = x + sensor_distance * cos(theta - sensor_angle);
+        double leftSensorY = y + sensor_distance * sin(theta - sensor_angle);
+
+        double rightSensorX = x + sensor_distance * cos(theta + sensor_angle);
+        double rightSensorY = y + sensor_distance * sin(theta + sensor_angle);
+
+        double straightSensorX = x + sensor_distance * cos(theta);
+        double straightSensorY = y + sensor_distance * sin(theta);
+
+        // Wrap around the sensor positions
+        leftSensorX = ((int)leftSensorX + SCREEN_WIDTH) % SCREEN_WIDTH;
+        leftSensorY = ((int)leftSensorY + SCREEN_HEIGHT) % SCREEN_HEIGHT;
+
+        rightSensorX = ((int)rightSensorX + SCREEN_WIDTH) % SCREEN_WIDTH;
+        rightSensorY = ((int)rightSensorY + SCREEN_HEIGHT) % SCREEN_HEIGHT;
+
+        straightSensorX = ((int)straightSensorX + SCREEN_WIDTH) % SCREEN_WIDTH;
+        straightSensorY = ((int)straightSensorY + SCREEN_HEIGHT) % SCREEN_HEIGHT;
+
+        // Get pheromone concentrations at sensor positions
+        double leftConcentration = trail.getConcentration(leftSensorX, leftSensorY);
+        double rightConcentration = trail.getConcentration(rightSensorX, rightSensorY);
+        double straightConcentration = trail.getConcentration(straightSensorX, straightSensorY);
+
+        double maxConcentration = max({ leftConcentration, rightConcentration, straightConcentration });
+
+        // Adjust velocity based on max concentration value
+        if (maxConcentration >= 1.0) {
+            //velocity = 3 * VELOCITY;  // Triple the velocity
+        }
+        else if (maxConcentration < 0.1) {
+            //velocity = VELOCITY;  // Return to base velocity
+        }
+        else {
+            // Ramp the velocity proportionally between 1x and 3x
+            //velocity = VELOCITY + 20 * VELOCITY * (maxConcentration - 0.1) / 0.9;
+        }
+
+        // Logic to move based on pheromone concentrations
+        if (leftConcentration > rightConcentration && leftConcentration > straightConcentration) {
+            // Turn left
+            theta -= sensor_angle;
+        }
+        else if (rightConcentration > leftConcentration && rightConcentration > straightConcentration) {
+            // Turn right
+            theta += sensor_angle;
+        }
+        // else, move straight ahead because straightConcentration is either highest or all are equal
+
+        //base velocity is global value VELOCITY
+        
+        // Move forward based on heading and velocity
+        x += cos(theta) * velocity;
+        y += sin(theta) * velocity;
+
+        // Deposit pheromone as the particle moves
+        trail.depositPheromone((int)x, (int)y, DEPOSIT);
+
+        // Wrap around the screen edges
+        if (x >= SCREEN_WIDTH) x = 0;
+        if (x < 0) x = SCREEN_WIDTH - 1;
+        if (y >= SCREEN_HEIGHT) y = 0;
+        if (y < 0) y = SCREEN_HEIGHT - 1;
+    }
+    void applyForce(double force_x, double force_y, double strength, double radius) {
+        // Calculate the distance between the particle and the force center
+        double dx = force_x - x;
+        double dy = force_y - y;
+        double distance = sqrt(dx * dx + dy * dy);
+
+        if (distance < radius) {
+            // Calculate the angle between the particle's position and the force center
+            double angleToForce = atan2(dy, dx);
+
+            // Adjust the coefficients to get the desired curve
+            const double velCoefficient = 0.02; // This value can be adjusted
+            const double thetaCoefficient = 0.06; // This value can be adjusted
+
+            // Calculate exponential influence on velocity
+            double velInfluence = 10.0 * (1 - exp(-velCoefficient * distance * distance / (radius * radius)));
+            velocity = VELOCITY + (5.0 * VELOCITY - VELOCITY) * velInfluence;  // Adjust velocity range between VELOCITY and 5*VELOCITY based on velInfluence
+
+            // Calculate exponential influence on theta
+            double influence = strength * (1 - exp(-thetaCoefficient * distance * distance / (radius * radius)));
+
+            if (strength > 0) {
+                // Attraction: Rotate the particle towards the force center
+                theta += influence * (angleToForce - theta);
+            }
+            else {
+                // Repulsion: Rotate the particle away from the force center
+                theta += influence * (theta - angleToForce);
+            }
+        }
+    }
+
+
+
+};
+
+vector<Particle> createParticles(int count, double sensor_angle, double sensor_distance, double velocity) {
+    vector<Particle> particles;
+    for (int i = 0; i < count; i++) {
+        int x = randomInt(PADDING*20, GRID_SIZE - PADDING*20); 
+        int y = randomInt(PADDING * 20, GRID_SIZE - PADDING * 20);
+        // Generate a random theta between -π and π
+        double theta = (static_cast<double>(rand()) / RAND_MAX) * 2.0 * M_PI - M_PI;
+
+        particles.push_back(Particle(x, y, theta, sensor_angle, sensor_distance, velocity));
+    }
+    return particles;
+}
+
+
+int main(void)
+{
+    GLFWwindow* window;
+    /* Initialize the library */
+    if (!glfwInit())
+        return -1;
+    /* Create a windowed mode window and its OpenGL context */
+    window = glfwCreateWindow(SCREEN_WIDTH, SCREEN_HEIGHT, "slime mold simulation", NULL, NULL);
+    if (!window)
+    {
+        glfwTerminate();
+        return -1;
+    }
+    /* Make the window's context current */
+    glfwMakeContextCurrent(window);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    glOrtho(0.0, SCREEN_WIDTH, SCREEN_HEIGHT, 0.0, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+    //------------
+
+
+    // Seed the random number generator
+    srand(time(0));
+
+    // Create a Trail object
+    Trail trail;
+
+    // Initialize particles
+    vector<Particle> particles = createParticles(PARTICLES, SENSOR_ANGLE, SENSOR_DISTANCE, VELOCITY);
+
+    //------------
+
+    double lastTime = glfwGetTime();
+    int frames = 0;
+    int count = 0;
+    /* Loop until the user closes the window */
+    while (!glfwWindowShouldClose(window))
+    {
+        double currentTime = glfwGetTime();
+        frames++;
+
+        if (currentTime - lastTime >= 1.0) {
+            cout << frames << " FPS" << endl;
+            frames = 0;
+            lastTime = currentTime;
+        }
+
+        //-------------
+
+        // Move each particle based on pheromone concentrations
+        for (Particle& particle : particles) {
+            particle.move(trail);
+            //particle.applyForce(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2,  0.03,  100);
+        }
+
+        // Diffuse pheromone concentrations in the grid
+        //if (count % 9 == 0) { trail.diffuse(); }
+
+        // Apply decay to the pheromone concentrations in the grid
+        trail.decay(DECAY_RATE);
+
+
+        //-------------
+
+        /* Render here */
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        //--
+        trail.draw();
+        // Draw the particles
+        //for (const Particle& particle : particles) {particle.draw();}
+        //--
+
+        /* Swap front and back buffers */
+        glfwSwapBuffers(window);
+
+        /* Poll for and process events */
+        glfwPollEvents();
+        
+        // FPS regulation logic
+        //double frameTime = glfwGetTime() - lastTime;
+        //while (frameTime < (1/ TARGET_FPS)) {frameTime = glfwGetTime() - lastTime;}
+        //lastTime = glfwGetTime();
+
+    }
+
+    glfwTerminate();
+    return 0;
+}
